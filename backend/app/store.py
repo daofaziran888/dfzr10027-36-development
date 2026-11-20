@@ -14,10 +14,17 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
-        self._tables.setdefault("_pipeline_results", [])
+        for reserved in (
+            "_pipeline_results",
+            "_schedule_runs",
+            "_schedule_run_products",
+            "_schedule_run_ledger",
+        ):
+            self._tables.setdefault(reserved, [])
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        """业务模块清单；下划线开头的是运行流水等内部命名空间，不参与模块统计。"""
+        return sorted(name for name in self._tables if not name.startswith("_"))
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -51,6 +58,10 @@ store = Store()
 
 
 def reset_store() -> None:
-    """重新初始化全局 store，用于测试隔离。"""
-    global store
-    store = Store()
+    """重新初始化全局 store，用于测试隔离。
+
+    只在原对象上换掉表数据、不重新绑定模块变量：各服务模块是用
+    ``from app.store import store`` 拿到的引用，重新绑定会让它们继续写旧库。
+    """
+    fresh = Store()
+    store._tables = fresh._tables

@@ -1,4 +1,7 @@
-"""调度编排接口：维护调度计划，覆盖激活计划、立即执行、停用计划等动作。"""
+"""调度编排接口：维护调度计划，覆盖激活计划、立即执行、停用计划等动作。
+
+本轮的按依赖执行走独立接口：启动 / 恢复 / 查询本轮执行详情与产物流水。
+"""
 from __future__ import annotations
 
 import csv
@@ -9,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services.schedule_plan import SchedulePlanService
+from app.services.schedule_run import service as run_service
 
 router = APIRouter(prefix="/api/schedule_plan", tags=["调度编排"])
 
@@ -85,8 +89,53 @@ def create_entry(payload: dict[str, object]) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
-    """对单条调度计划执行激活计划、立即执行、停用计划；不允许的动作会被拦下并说明原因。"""
-    entry, message = service.run_action(entry_id, payload.action.strip())
+    """对单条调度计划执行激活计划、立即执行、停用计划；不允许的动作会被拦下并说明原因。
+
+    「立即执行」会在改状态之外真正启动本轮流水；关联任务没登记或本轮已在下发时，
+    状态照常流转，流水侧的说明拼回消息里，便于前端提示。
+    """
+    action = payload.action.strip()
+    entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)
+    if action == "立即执行":
+        _, run_message = run_service.start_run(entry_id)
+        message = f"{message}；{run_message}"
     return ActionResult(ok=True, message=message, entry=entry)
+
+
+# ---------------------------------------------------------------------------
+# 本轮执行流水：按依赖调度关联聚合任务
+# ---------------------------------------------------------------------------
+
+@router.post("/{entry_id}/runs", response_model=ActionResult)
+def start_run(entry_id: int) -> ActionResult:
+    """启动本轮调度：按依赖放行关联聚合任务，产物版本回写到本轮流水。"""
+    detail, message = run_service.start_run(entry_id)
+    if detail is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=detail)
+
+
+@router.post("/{entry_id}/runs/resume", response_model=ActionResult)
+def resume_run(entry_id: int) -> ActionResult:
+    """恢复同一轮调度：接续未完成任务，已确认交付的结果原样保留。"""
+    detail, message = run_service.resume_run(entry_id)
+    if detail is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=detail)
+
+
+@router.get("/{entry_id}/runs/current")
+def get_current_run(entry_id: int) -> dict:
+    """读取当前轮次执行详情：已交付、待计算、依赖阻塞与派生产物。"""
+    detail = run_service.get_detail(entry_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"调度计划 {entry_id} 还没有本轮执行流水")
+    return detail
+
+
+@router.get("/{entry_id}/runs/current/products")
+def list_run_products(entry_id: int) -> dict[str, object]:
+    """列出本轮已产出的聚合产物，含实际产物版本与取数依据。"""
+    return {"items": run_service.list_products(entry_id)}
